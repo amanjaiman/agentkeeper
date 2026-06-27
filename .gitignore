@@ -1,0 +1,11 @@
+# Build artifacts
+/agentkeeper
+/agentkeeper.exe
+/agentkeeper-linux
+/agentkeeper-*
+*.test
+/dist/
+
+# Local state / config
+*.local.toml
+.claude/settings.local.json

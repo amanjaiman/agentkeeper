@@ -1,0 +1,38 @@
+# goreleaser config for AgentKeeper. Tag a release (e.g. `git tag v0.1.0 && git
+# push --tags`) and the release workflow builds these artifacts.
+version: 2
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: agentkeeper
+    main: ./cmd/agentkeeper
+    binary: agentkeeper
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+
+archives:
+  - formats: [tar.gz]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  use: github
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"

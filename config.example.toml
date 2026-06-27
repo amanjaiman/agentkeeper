@@ -1,0 +1,47 @@
+# AgentKeeper configuration.
+# Copy to your OS config dir (e.g. ~/.config/agentkeeper/config.toml on Linux,
+# %AppData%\agentkeeper\config.toml on Windows) and edit as needed.
+# Any field you omit falls back to the built-in default.
+
+poll_interval = "3s"   # how often the pane is captured
+reset_buffer  = "60s"  # added to every reset time to avoid racing the server clock
+max_wait      = "24h"  # cap on a single wait; longer (weekly cap) -> notify + detach
+
+[agents.claude]
+launch_cmd      = "claude"
+resume_cmd      = "claude -c"
+# Patterns are Go regexes. Use named groups: (?P<time>...) for a clock time,
+# (?P<ts>...) for a unix timestamp. The limit/idle strings are undocumented and
+# can change on agent updates — fix them here, no reinstall needed.
+limit_patterns  = [
+  "(?i)limit reached.*resets\\s+(?P<time>.+)",
+  "(?i)Claude AI usage limit reached\\|(?P<ts>\\d+)",
+]
+inject_style    = "esc-text-enter"   # Esc, then text, then Enter
+transcript_glob = "~/.claude/projects/*/*.jsonl"
+# Appended to the launch command ONLY with the explicit --yolo opt-in (DANGEROUS:
+# unattended tool calls with no permission prompts).
+yolo_flag       = "--dangerously-skip-permissions"
+
+[agents.codex]
+launch_cmd     = "codex"
+resume_cmd     = "codex resume"
+# (?P<time>...) clock time, (?P<dur>...) relative duration ("in 2h30m" / "in 45 minutes").
+limit_patterns = [
+  "(?i)try again at (?P<time>.+)",
+  "(?i)try again in (?P<dur>.+)",
+  "(?i)rate limit.*reset[a-z ]*in (?P<dur>.+)",
+]
+inject_style   = "text-enter"        # text, then Enter
+yolo_flag      = "--dangerously-bypass-approvals-and-sandbox"
+
+# Local-LLM reprompt. Active only with `--reprompt ollama:<model>`; otherwise the
+# static prompt is used. On any failure (server down, empty/over-long/denylisted
+# output) AgentKeeper falls back to the static prompt.
+[reprompt]
+provider         = "ollama"
+model            = "llama3.1"            # used when --reprompt omits the model
+base_url         = "http://localhost:11434"  # also honors $OLLAMA_HOST
+max_prompt_chars = 600                   # injected instruction length cap
+tail_messages    = 20                    # transcript messages summarized for context
+denylist         = ["rm -rf", "force push", "--force", "drop table"]
