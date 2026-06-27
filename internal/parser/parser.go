@@ -40,7 +40,7 @@ func Detect(patterns []*regexp.Regexp, text string) (match string, groups map[st
 		groups = make(map[string]string)
 		for i, name := range re.SubexpNames() {
 			if name != "" && i < len(m) {
-				groups[name] = strings.TrimSpace(m[i])
+				groups[name] = strings.TrimRight(strings.TrimSpace(m[i]), ".,")
 			}
 		}
 		return strings.TrimSpace(m[0]), groups, true

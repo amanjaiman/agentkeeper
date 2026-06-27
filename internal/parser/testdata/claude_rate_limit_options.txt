@@ -1,0 +1,5 @@
+/rate-limit-options
+
+1. Stop and wait for the limit to reset
+2. Upgrade for more usage
+3. Switch model

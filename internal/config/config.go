@@ -70,8 +70,10 @@ func Default() Config {
 				LaunchCmd: "claude",
 				ResumeCmd: "claude -c",
 				LimitPatterns: []string{
-					`(?i)limit reached.*resets\s+(?P<time>.+)`,
 					`(?i)Claude AI usage limit reached\|(?P<ts>\d+)`,
+					`(?i)limit.*?reset[s]?\s+in\s+(?P<dur>[^\r\n.]+)`,
+					`(?i)(?:usage|session|weekly|\d+-?hour)\s+limit\s+reached.*?reset[s]?(?:\s+at)?\s+(?P<time>[^\r\n.]+)`,
+					`(?i)hit your\s+(?:usage|session|weekly)?\s*limit.*?reset[s]?(?:\s+at)?\s+(?P<time>[^\r\n.]+)`,
 				},
 				InjectStyle:    adapter.InjectEscTextEnter,
 				TranscriptGlob: "~/.claude/projects/*/*.jsonl",

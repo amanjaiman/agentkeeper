@@ -1,9 +1,13 @@
 package parser
 
 import (
+	"os"
+	"path/filepath"
 	"regexp"
 	"testing"
 	"time"
+
+	"github.com/amanjaiman/agentkeeper/internal/config"
 )
 
 func claudePatterns() []*regexp.Regexp {
@@ -42,6 +46,71 @@ func TestDetectNoMatch(t *testing.T) {
 	if _, _, ok := Detect(claudePatterns(), "all good, working away"); ok {
 		t.Fatal("did not expect a match")
 	}
+}
+
+func TestClaudeDefaultPatternsAgainstCorpus(t *testing.T) {
+	cfg := config.Default()
+	ad, err := cfg.Adapter("claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := refNow(t, "10:00")
+	cases := []string{
+		"claude_5_hour.txt",
+		"claude_session_limit.txt",
+		"claude_usage_sentence.txt",
+		"claude_weekly_limit.txt",
+		"claude_headless_unix.txt",
+		"claude_relative.txt",
+	}
+	for _, name := range cases {
+		t.Run(name, func(t *testing.T) {
+			text := readTestdata(t, name)
+			_, groups, ok := Detect(ad.LimitPatterns, text)
+			if !ok {
+				t.Fatalf("default Claude patterns did not match %s: %q", name, text)
+			}
+			ri := Resolve(groups, now, fallbackWindowTest)
+			if ri.Source == SourceFallback {
+				t.Fatalf("%s resolved via fallback; groups=%v", name, groups)
+			}
+			if !ri.Time.After(now) {
+				t.Fatalf("%s resolved to %v, want after %v", name, ri.Time, now)
+			}
+		})
+	}
+}
+
+func TestClaudeDefaultPatternsDoNotMatchApproachingLimit(t *testing.T) {
+	cfg := config.Default()
+	ad, err := cfg.Adapter("claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := readTestdata(t, "claude_approaching_limit.txt")
+	if match, _, ok := Detect(ad.LimitPatterns, text); ok {
+		t.Fatalf("approaching warning must not match; got %q", match)
+	}
+}
+
+func TestDetectTrimsTrailingPunctuationFromGroups(t *testing.T) {
+	pat := []*regexp.Regexp{regexp.MustCompile(`(?i)limit reached.*resets\s+(?P<time>[^\r\n]+)`)}
+	_, groups, ok := Detect(pat, "limit reached; resets 3pm.")
+	if !ok {
+		t.Fatal("expected a match")
+	}
+	if groups["time"] != "3pm" {
+		t.Fatalf("time group = %q, want %q", groups["time"], "3pm")
+	}
+}
+
+func readTestdata(t *testing.T, name string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("testdata", name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
 }
 
 func contains(s, sub string) bool {

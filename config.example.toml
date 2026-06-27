@@ -14,8 +14,10 @@ resume_cmd      = "claude -c"
 # (?P<ts>...) for a unix timestamp. The limit/idle strings are undocumented and
 # can change on agent updates — fix them here, no reinstall needed.
 limit_patterns  = [
-  "(?i)limit reached.*resets\\s+(?P<time>.+)",
   "(?i)Claude AI usage limit reached\\|(?P<ts>\\d+)",
+  "(?i)limit.*?reset[s]?\\s+in\\s+(?P<dur>[^\\r\\n.]+)",
+  "(?i)(?:usage|session|weekly|\\d+-?hour)\\s+limit\\s+reached.*?reset[s]?(?:\\s+at)?\\s+(?P<time>[^\\r\\n.]+)",
+  "(?i)hit your\\s+(?:usage|session|weekly)?\\s*limit.*?reset[s]?(?:\\s+at)?\\s+(?P<time>[^\\r\\n.]+)",
 ]
 inject_style    = "esc-text-enter"   # Esc, then text, then Enter
 transcript_glob = "~/.claude/projects/*/*.jsonl"
