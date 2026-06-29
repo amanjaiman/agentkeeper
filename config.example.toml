@@ -25,12 +25,14 @@ transcript_glob = "~/.claude/projects/*/*.jsonl"
 # unattended tool calls with no permission prompts).
 yolo_flag       = "--dangerously-skip-permissions"
 
-# Optional, after you verify your local Claude menu uses "1" for the safe
-# "Stop and wait for the limit to reset" choice:
-# [[agents.claude.auto_responses]]
-# pattern = "(?i)rate.?limit.?options|stop and wait for (?:the|your) limit to reset"
-# keys    = "1\r"
-# once    = true
+# Built-in by default: when Claude's rate-limit menu appears, AgentKeeper auto-
+# selects "1. Stop and wait for the limit to reset" so you don't have to. It only
+# presses a key once the verified stop-and-wait wording is on screen. Override or
+# disable it here (set keys = "" to turn the key-press into a notify-only prompt).
+[[agents.claude.auto_responses]]
+pattern = "(?i)rate.?limit.?options|stop and wait for (?:the|your) limit to reset"
+keys    = "1\r"
+once    = true
 
 [agents.codex]
 launch_cmd     = "codex"

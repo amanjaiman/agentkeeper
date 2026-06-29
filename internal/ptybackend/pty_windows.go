@@ -248,16 +248,22 @@ func (c *Client) Capture(scrollback int) (string, error) {
 	return strings.Join(lines, "\n"), nil
 }
 
-// Inject writes the resume keystrokes to the console input (Enter = CR).
+// Inject writes the resume keystrokes to the console input (Enter = CR). The
+// text and its trailing Enter are sent as separate writes with a short settle
+// delay so the agent's TUI accepts the Enter as a submit rather than swallowing
+// it into the pasted block (see submitSettle).
 func (c *Client) Inject(text, style string) error {
 	if c.inWrite == nil {
 		return fmt.Errorf("conpty not started")
 	}
-	if style == adapter.InjectKeys {
+	switch style {
+	case adapter.InjectKeys:
 		_, err := c.inWrite.Write([]byte(text))
 		return err
+	case adapter.InjectEnter:
+		return c.submit()
 	}
-	if style == "esc-text-enter" {
+	if style == adapter.InjectEscTextEnter {
 		if _, err := c.inWrite.Write([]byte{0x1b}); err != nil {
 			return err
 		}
@@ -265,6 +271,12 @@ func (c *Client) Inject(text, style string) error {
 	if _, err := c.inWrite.Write([]byte(text)); err != nil {
 		return err
 	}
+	return c.submit()
+}
+
+// submit sends Enter on its own after letting the just-written text settle.
+func (c *Client) submit() error {
+	time.Sleep(submitSettle)
 	_, err := c.inWrite.Write([]byte("\r"))
 	return err
 }

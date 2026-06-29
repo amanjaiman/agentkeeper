@@ -3,10 +3,18 @@ package ptybackend
 import (
 	"os"
 	"regexp"
+	"time"
 )
 
 // ringSize bounds how much recent pty/conpty output is retained for Capture.
 const ringSize = 64 * 1024
+
+// submitSettle is how long Inject waits after writing the prompt text before
+// sending the Enter. A coding-agent TUI buffers a fast paste, and a CR glued to
+// the end of that paste is often swallowed as part of the pasted block instead
+// of submitting it. Letting the text land first, then sending Enter on its own,
+// makes the submit reliable.
+const submitSettle = 150 * time.Millisecond
 
 // ansi matches OSC sequences, CSI sequences, two-char escapes, CR and NUL — the
 // control noise a real TUI emits, stripped so limit-string matching sees text.

@@ -86,6 +86,15 @@ func Default() Config {
 				InjectStyle:    adapter.InjectEscTextEnter,
 				TranscriptGlob: "~/.claude/projects/*/*.jsonl",
 				YoloFlag:       "--dangerously-skip-permissions",
+				// Auto-answer Claude's rate-limit menu by choosing the safe
+				// "1. Stop and wait for the limit to reset" option, so the user
+				// doesn't have to. The supervisor still gates this on the verified
+				// stop-and-wait wording before pressing any key (see scanAutoResponses).
+				AutoResponses: []AutoResponseConfig{{
+					Pattern: `(?i)rate.?limit.?options|stop and wait for (?:the|your) limit to reset`,
+					Keys:    "1\r",
+					Once:    true,
+				}},
 			},
 			"codex": {
 				LaunchCmd: "codex",

@@ -18,6 +18,10 @@ const (
 	// InjectKeys sends the configured keystrokes exactly as provided. It is used
 	// for prompt/menu auto-responses where the config owns the Enter key.
 	InjectKeys = "keys"
+	// InjectEnter sends a single Enter (CR) and nothing else. It is used to
+	// (re)submit a prompt that was typed into the input box but not accepted,
+	// without re-typing the text.
+	InjectEnter = "enter"
 )
 
 // Adapter describes how to drive a particular coding agent: how to launch it,

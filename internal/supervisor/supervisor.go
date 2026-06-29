@@ -59,9 +59,20 @@ const fallbackWindow = 5 * time.Hour
 // re-triggers the limit before giving up and detaching.
 const maxLimitCycles = 3
 
-// maxInjectAttempts bounds re-injection when the first resume keystroke does not
-// visibly change the pane.
+// maxInjectAttempts bounds re-injection / re-submission when the resume prompt
+// does not visibly take (no change, or it stays unsent in the input box).
 const maxInjectAttempts = 3
+
+// resumeTailLines / resumeNeedleChars define how the supervisor decides whether
+// the resume prompt is still sitting unsent in the input box: it looks for a
+// leading slice of the prompt within the last few lines of the pane (the input
+// area). A submitted prompt leaves the input box, so its absence there is the
+// signal the Enter actually took. A small window keeps unrelated echoes of the
+// prompt (e.g. the user-turn rendered above) from masking a real submit.
+const (
+	resumeTailLines   = 4
+	resumeNeedleChars = 30
+)
 
 // reLimitBackoffStep is added per re-limit cycle on top of the parsed reset, so
 // a resume that keeps re-hitting the limit waits progressively longer instead of
@@ -137,6 +148,7 @@ type Supervisor struct {
 	injected       bool
 	injectAttempts int
 	preInject      string
+	injectedText   string // the resume prompt last typed, used to detect "typed but unsent"
 	handledAuto    map[int]string
 
 	killed       bool
@@ -430,7 +442,7 @@ func (s *Supervisor) scanAutoResponses(capture string) {
 			s.opt.Logf("auto-response injection failed: %v", err)
 			continue
 		}
-		s.opt.Logf("auto-response injected for safe stop-and-wait menu")
+		s.opt.Logf("rate-limit menu detected; auto-selected the safe stop-and-wait option (sent %q)", ar.Keys)
 		if ar.Once {
 			s.handledAuto[i] = match
 		}
@@ -447,6 +459,7 @@ func (s *Supervisor) onWaiting(now time.Time) {
 		s.opt.Logf("reset reached; resuming")
 		s.injected = false
 		s.injectAttempts = 0
+		s.injectedText = ""
 		s.st = state.Resuming
 		return
 	}
@@ -464,6 +477,7 @@ func (s *Supervisor) onResuming(capture string, now time.Time) error {
 			text = prompt.DefaultText
 		}
 		s.preInject = capture
+		s.injectedText = text
 		if err := s.opt.Tmux.Inject(text, s.opt.Adapter.InjectStyle); err != nil {
 			return fmt.Errorf("inject resume prompt: %w", err)
 		}
@@ -473,38 +487,61 @@ func (s *Supervisor) onResuming(capture string, now time.Time) error {
 		return nil
 	}
 
-	// Verify the injection took: the pane should have changed.
-	if capture != s.preInject {
-		// Did the resume immediately re-hit the limit? Only a NEW limit line
-		// counts — the line that triggered this event still lingers in scrollback
-		// and must not be mistaken for a fresh re-hit.
-		if match, groups, limited := parser.Detect(s.opt.Adapter.LimitPatterns, capture); limited && match != s.currentMatch {
-			s.limitCycles++
-			if s.limitCycles >= maxLimitCycles {
-				s.opt.Logf("limit re-triggered %d times after resume; detaching. Take over with: %s",
-					s.limitCycles, s.opt.Tmux.AttachHint())
-				s.st = state.Detached
-				return nil
-			}
-			s.opt.Logf("resume re-hit the limit (cycle %d); re-waiting", s.limitCycles)
-			s.currentMatch = match
-			s.groups = groups
-			s.injected = false
-			s.st = state.Limited
+	// Nothing rendered at all: the keystrokes did not even take. Re-inject the
+	// whole prompt after a couple of stable polls, up to the cap.
+	if capture == s.preInject {
+		if s.injectAttempts >= maxInjectAttempts {
+			s.opt.Logf("resume prompt did not visibly take after %d attempts; assuming sent and resuming watch", s.injectAttempts)
+			s.resumeConfirmed()
 			return nil
 		}
-		s.opt.Logf("resume confirmed; back to running")
-		s.resumeConfirmed()
+		s.injected = false // allow re-injection next tick
 		return nil
 	}
 
-	// No change yet. Re-inject after a couple of stable polls, up to the cap.
-	if s.injectAttempts >= maxInjectAttempts {
-		s.opt.Logf("resume prompt did not visibly take after %d attempts; assuming sent and resuming watch", s.injectAttempts)
-		s.resumeConfirmed()
+	// The pane changed. Did the resume immediately re-hit the limit? Only a NEW
+	// limit line counts — the line that triggered this event still lingers in
+	// scrollback and must not be mistaken for a fresh re-hit.
+	if match, groups, limited := parser.Detect(s.opt.Adapter.LimitPatterns, capture); limited && match != s.currentMatch {
+		s.limitCycles++
+		if s.limitCycles >= maxLimitCycles {
+			s.opt.Logf("limit re-triggered %d times after resume; detaching. Take over with: %s",
+				s.limitCycles, s.opt.Tmux.AttachHint())
+			s.st = state.Detached
+			return nil
+		}
+		s.opt.Logf("resume re-hit the limit (cycle %d); re-waiting", s.limitCycles)
+		s.currentMatch = match
+		s.groups = groups
+		s.injected = false
+		s.injectAttempts = 0
+		s.st = state.Limited
 		return nil
 	}
-	s.injected = false // allow re-injection next tick
+
+	// If the prompt is still sitting in the input box, it was typed but not
+	// submitted. Wait for the agent to settle (so we don't press Enter mid-render),
+	// then press Enter (only) to submit it — never re-type the whole prompt.
+	if promptStillInInput(capture, s.injectedText) {
+		if !s.idle(capture, now) {
+			return nil // still rendering; give it a chance to submit on its own
+		}
+		if s.injectAttempts >= maxInjectAttempts {
+			s.opt.Logf("resume prompt typed but not submitted after %d attempts; assuming sent and resuming watch", s.injectAttempts)
+			s.resumeConfirmed()
+			return nil
+		}
+		if err := s.opt.Tmux.Inject("", adapter.InjectEnter); err != nil {
+			return fmt.Errorf("submit resume prompt: %w", err)
+		}
+		s.injectAttempts++
+		s.opt.Logf("resume prompt not yet submitted; pressed Enter to submit (attempt %d)", s.injectAttempts)
+		return nil
+	}
+
+	// The prompt left the input box (the agent is working again): resume confirmed.
+	s.opt.Logf("resume confirmed; back to running")
+	s.resumeConfirmed()
 	return nil
 }
 
@@ -521,9 +558,29 @@ func (s *Supervisor) resumeConfirmed() {
 	s.limitCycles = 0
 	s.injected = false
 	s.injectAttempts = 0
+	s.injectedText = ""
 	s.reset = parser.ResetInfo{}
 	s.waitUntil = time.Time{}
 	s.st = state.Running
+}
+
+// promptStillInInput reports whether the just-typed resume prompt still appears
+// near the bottom of the pane — i.e., it is sitting in the input box unsent. A
+// submitted prompt moves up into the conversation and out of the input box, so
+// its absence from the bottom region is the signal the Enter took.
+func promptStillInInput(capture, promptText string) bool {
+	needle := []rune(strings.TrimSpace(promptText))
+	if len(needle) == 0 {
+		return false
+	}
+	if len(needle) > resumeNeedleChars {
+		needle = needle[:resumeNeedleChars]
+	}
+	lines := strings.Split(strings.TrimRight(capture, "\n"), "\n")
+	if len(lines) > resumeTailLines {
+		lines = lines[len(lines)-resumeTailLines:]
+	}
+	return strings.Contains(strings.Join(lines, "\n"), string(needle))
 }
 
 // idle reports whether the agent is ready for input. If the adapter defines an
