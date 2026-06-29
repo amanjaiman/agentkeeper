@@ -97,7 +97,12 @@ const scrollback = 100
 // loop forever.
 const maxCaptureFails = 5
 
-var safeStopAndWait = regexp.MustCompile(`(?i)stop and wait for (?:the|your) limit to reset`)
+var (
+	safeStopAndWait = regexp.MustCompile(`(?i)\b(?:stop\s+and\s+wait\s+for\s+(?:(?:the|your)\s+)?limit\s+to\s+resets?|wait\b.{0,40}\b(?:limit\b.{0,20})?resets?|pause\b.{0,40}\bresets?)\b`)
+	unsafePrompt    = regexp.MustCompile(`(?i)\b(upgrade|team\s+plan|billing|paid|overage|purchase|subscribe|switch(?:ing)?\s+(?:to\s+)?(?:model|plan))\b`)
+	yesNoPrompt     = regexp.MustCompile(`(?im)^\s*y\.\s+.+\n\s*n\.\s+.+\nEnter y/n:`)
+	numberedPrompt  = regexp.MustCompile(`(?m)^\s*(?:[>\x{276F}]\s*)?1\.\s+\S`)
+)
 
 // Options configures a Supervisor.
 type Options struct {
@@ -114,6 +119,9 @@ type Options struct {
 	// WatchOnly, when true, notifies at reset but never injects: on reaching the
 	// reset it logs and detaches, leaving the resume to the human.
 	WatchOnly bool
+	// AutoAnswerPrompts, when true, answers generic interactive agent prompts
+	// with their first/default option. Dangerous: may approve tool calls.
+	AutoAnswerPrompts bool
 	// Commands delivers external control requests (detach/kill). May be nil.
 	Commands <-chan Command
 	// OnUpdate, if set, is called whenever the observable state changes so the
@@ -150,6 +158,7 @@ type Supervisor struct {
 	preInject      string
 	injectedText   string // the resume prompt last typed, used to detect "typed but unsent"
 	handledAuto    map[int]string
+	handledPrompt  string
 
 	killed       bool
 	ended        bool
@@ -267,6 +276,9 @@ func (s *Supervisor) tick() error {
 			delete(s.handledAuto, i)
 		}
 	}
+	if s.handledPrompt != "" && !strings.Contains(capture, s.handledPrompt) {
+		s.handledPrompt = ""
+	}
 
 	// If a human has taken over the session, step aside rather than fighting them
 	// for the input. Only meaningful while observing or waiting.
@@ -355,17 +367,23 @@ func (s *Supervisor) onRunning(capture string, now time.Time) {
 	}
 	match, groups, ok := parser.Detect(s.opt.Adapter.LimitPatterns, capture)
 	if !ok {
-		s.scanAutoResponses(capture)
+		if !s.scanAutoResponses(capture) {
+			s.scanAutoAnswerPrompt(capture, now)
+		}
 		return
 	}
 	// Ignore the same limit line we already handled and that is still sitting in
 	// the captured scrollback — it is not a new limit event.
 	if match == s.handledMatch {
-		s.scanAutoResponses(capture)
+		if !s.scanAutoResponses(capture) {
+			s.scanAutoAnswerPrompt(capture, now)
+		}
 		return
 	}
 	if s.ignorePostResumeLimit(groups, now) {
-		s.scanAutoResponses(capture)
+		if !s.scanAutoResponses(capture) {
+			s.scanAutoAnswerPrompt(capture, now)
+		}
 		return
 	}
 	s.limitLatched = true
@@ -373,11 +391,15 @@ func (s *Supervisor) onRunning(capture string, now time.Time) {
 	s.groups = groups
 	s.st = state.Limited
 	s.opt.Logf("usage limit detected")
-	s.scanAutoResponses(capture)
+	if !s.scanAutoResponses(capture) {
+		s.scanAutoAnswerPrompt(capture, now)
+	}
 }
 
 func (s *Supervisor) onLimited(capture string, now time.Time) {
-	s.scanAutoResponses(capture)
+	if !s.scanAutoResponses(capture) {
+		s.scanAutoAnswerPrompt(capture, now)
+	}
 	s.reset = parser.Resolve(s.groups, now, fallbackWindow)
 	s.waitUntil = s.reset.Time.Add(s.opt.ResetBuffer)
 
@@ -414,9 +436,9 @@ func (s *Supervisor) ignorePostResumeLimit(groups map[string]string, now time.Ti
 	return false
 }
 
-func (s *Supervisor) scanAutoResponses(capture string) {
+func (s *Supervisor) scanAutoResponses(capture string) bool {
 	if len(s.opt.Adapter.AutoResponses) == 0 {
-		return
+		return false
 	}
 	if s.handledAuto == nil {
 		s.handledAuto = make(map[int]string)
@@ -427,26 +449,76 @@ func (s *Supervisor) scanAutoResponses(capture string) {
 			continue
 		}
 		if ar.Once && s.handledAuto[i] == match {
-			continue
+			return true
 		}
-		if ar.Keys == "" || !safeStopAndWait.MatchString(capture) {
-			msg := "manual choice needed at the agent: rate-limit menu matched but no verified stop-and-wait keystrokes are configured"
+		if ar.Keys == "" {
+			msg := "manual choice needed at the agent: rate-limit menu matched but no verified keystrokes are configured"
 			s.opt.Logf("%s", msg)
 			if s.opt.OnManualAction != nil {
 				s.opt.OnManualAction(msg)
 			}
 			s.handledAuto[i] = match
-			continue
+			return true
+		}
+		if !safeStopAndWait.MatchString(capture) {
+			msg := "manual choice needed at the agent: rate-limit menu matched, but verified safe stop-and-wait option text was not found"
+			s.opt.Logf("%s", msg)
+			if s.opt.OnManualAction != nil {
+				s.opt.OnManualAction(msg)
+			}
+			s.handledAuto[i] = match
+			return true
 		}
 		if err := s.opt.Tmux.Inject(ar.Keys, adapter.InjectKeys); err != nil {
 			s.opt.Logf("auto-response injection failed: %v", err)
-			continue
+			return true
 		}
 		s.opt.Logf("rate-limit menu detected; auto-selected the safe stop-and-wait option (sent %q)", ar.Keys)
 		if ar.Once {
 			s.handledAuto[i] = match
 		}
+		return true
 	}
+	return false
+}
+
+func (s *Supervisor) scanAutoAnswerPrompt(capture string, now time.Time) {
+	if !s.opt.AutoAnswerPrompts || s.opt.Adapter.PromptPattern == nil {
+		return
+	}
+	match := s.opt.Adapter.PromptPattern.FindString(capture)
+	if match == "" || s.handledPrompt == match {
+		return
+	}
+	if !s.idle(capture, now) {
+		return
+	}
+	if unsafePrompt.MatchString(match) {
+		msg := "manual choice needed at the agent: interactive prompt matched auto-answer detector, but contains plan/model/paid-option wording"
+		s.opt.Logf("%s", msg)
+		if s.opt.OnManualAction != nil {
+			s.opt.OnManualAction(msg)
+		}
+		s.handledPrompt = match
+		return
+	}
+	keys := firstPromptKeys(match)
+	if err := s.opt.Tmux.Inject(keys, adapter.InjectKeys); err != nil {
+		s.opt.Logf("auto-answer prompt injection failed: %v", err)
+		return
+	}
+	s.handledPrompt = match
+	s.opt.Logf("auto-answer-prompts: answered interactive prompt with first/default option (sent %q)", keys)
+}
+
+func firstPromptKeys(promptText string) string {
+	if yesNoPrompt.MatchString(promptText) {
+		return "y\r"
+	}
+	if numberedPrompt.MatchString(promptText) {
+		return "1\r"
+	}
+	return "\r"
 }
 
 func (s *Supervisor) onWaiting(now time.Time) {

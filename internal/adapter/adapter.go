@@ -34,6 +34,7 @@ type Adapter struct {
 	ResumeCmd      string
 	LimitPatterns  []*regexp.Regexp
 	IdlePattern    *regexp.Regexp // may be nil; nil => fall back to stability heuristic
+	PromptPattern  *regexp.Regexp // may be nil; nil => generic prompt auto-answer unavailable
 	InjectStyle    string
 	TranscriptGlob string
 	// YoloFlag is the agent's flag that skips permission prompts / enables
@@ -51,6 +52,7 @@ type Spec struct {
 	ResumeCmd      string
 	LimitPatterns  []string
 	IdlePattern    string
+	PromptPattern  string
 	InjectStyle    string
 	TranscriptGlob string
 	YoloFlag       string
@@ -103,6 +105,13 @@ func Compile(name string, s Spec) (*Adapter, error) {
 			return nil, fmt.Errorf("adapter %q: idle_pattern %q: %w", name, s.IdlePattern, err)
 		}
 		a.IdlePattern = re
+	}
+	if s.PromptPattern != "" {
+		re, err := regexp.Compile(s.PromptPattern)
+		if err != nil {
+			return nil, fmt.Errorf("adapter %q: prompt_pattern %q: %w", name, s.PromptPattern, err)
+		}
+		a.PromptPattern = re
 	}
 	for i, ar := range s.AutoResponses {
 		if ar.Pattern == "" {

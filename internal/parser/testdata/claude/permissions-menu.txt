@@ -1,0 +1,14 @@
+you: /permissions
+Permissions  Recently denied   Allow   Ask   Deny   Workspace
+Claude Code won't ask before using allowed tools.
+⌕ Search...
+1. Add a new rule...
+2. PowerShell($go = Get-Command go -ErrorAction SilentlyContinue; if \(-not
+$go\) { $cand = "C:\\Program Files\\Go\\bin\\go.exe"; if \(Test-Path $cand\) {
+$env:Path = "C:\\Program Files\\Go\\bin;" + $env:Path } }; go version)
+3. PowerShell($v = \(Get-Command go -ErrorAction SilentlyContinue\); if \($v\) {
+ go version; go env GOPATH GOOS } else { "go not found" })
+4. PowerShell(winget install --id GoLang.Go -e --accept-source-agreements
+--accept-package-agreements --silent)
+Enter selection [1-4], or Escape to cancel:
+←/→ to switch · ↓ to select · Esc to cancel

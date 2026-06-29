@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/amanjaiman/agentkeeper/internal/adapter"
+	"github.com/amanjaiman/agentkeeper/internal/config"
 	"github.com/amanjaiman/agentkeeper/internal/prompt"
 	"github.com/amanjaiman/agentkeeper/internal/state"
 )
@@ -449,12 +450,12 @@ func TestWatchOnlyDetachesAtResetWithoutInjecting(t *testing.T) {
 }
 
 func TestAutoResponseInjectsSafeStopAndWaitOnce(t *testing.T) {
-	menu := readParserTestdata(t, "claude_rate_limit_options.txt")
+	menu := readParserTestdata(t, "claude", "rate-limit-menu.txt")
 	pane := &fakePane{screen: "Claude usage limit reached. Your limit will reset at 11am.\n" + menu}
 	ad, err := adapter.Compile("claude", adapter.Spec{
 		LimitPatterns: []string{`(?i)usage limit reached.*reset at (?P<time>[^\r\n.]+)`},
 		AutoResponses: []adapter.AutoResponseSpec{{
-			Pattern: `(?i)rate.?limit.?options|stop and wait for (?:the|your) limit to reset`,
+			Pattern: `(?i)rate.?limit.?options|stop and wait for (?:(?:the|your) )?limit to reset`,
 			Keys:    "1\r",
 			Once:    true,
 		}},
@@ -476,6 +477,31 @@ func TestAutoResponseInjectsSafeStopAndWaitOnce(t *testing.T) {
 	}
 	if pane.styles[0] != adapter.InjectKeys {
 		t.Fatalf("style = %q, want %q", pane.styles[0], adapter.InjectKeys)
+	}
+}
+
+func TestSafeStopAndWaitGateMatchesCapturedMenu(t *testing.T) {
+	menu := readParserTestdata(t, "claude", "rate-limit-menu.txt")
+	if !safeStopAndWait.MatchString(menu) {
+		t.Fatal("safe stop-and-wait gate did not match captured Claude rate-limit menu")
+	}
+	for _, variant := range []string{
+		"1. Stop and wait for the limit to reset",
+		"1. Wait until your limit resets",
+		"1. Pause until limit reset",
+	} {
+		if !safeStopAndWait.MatchString(variant) {
+			t.Fatalf("safe stop-and-wait gate did not match plausible variant %q", variant)
+		}
+	}
+	for _, unsafe := range []string{
+		"1. Upgrade your plan",
+		"1. Switch model",
+		"1. Buy paid overage",
+	} {
+		if safeStopAndWait.MatchString(unsafe) {
+			t.Fatalf("safe stop-and-wait gate matched unsafe option %q", unsafe)
+		}
 	}
 }
 
@@ -508,6 +534,117 @@ func TestAutoResponseAmbiguousMenuNotifiesWithoutInjecting(t *testing.T) {
 	}
 	if len(manual) != 1 {
 		t.Fatalf("manual notifications = %d, want 1", len(manual))
+	}
+	if !strings.Contains(manual[0], "verified safe stop-and-wait option text was not found") {
+		t.Fatalf("manual notification did not explain gate miss: %q", manual[0])
+	}
+}
+
+func TestAutoAnswerPromptsDisabledByDefault(t *testing.T) {
+	menu := readParserTestdata(t, "claude", "permissions-menu.txt")
+	clk := &driveClock{t: time.Date(2026, 6, 26, 10, 0, 0, 0, time.Local)}
+	ad, err := config.Default().Adapter("claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pane := &fakePane{screen: menu}
+	sup := New(Options{
+		Adapter: ad, Tmux: pane, Prompt: prompt.NewStatic("continue"),
+		PollInterval: time.Second, ResetBuffer: time.Second, MaxWait: 24 * time.Hour,
+		Now: clk.now,
+	})
+	must(t, sup.tick())
+	clk.add(3 * time.Second)
+	must(t, sup.tick())
+	if len(pane.injected) != 0 {
+		t.Fatalf("auto-answer disabled must not inject, got %q", pane.injected)
+	}
+}
+
+func TestAutoAnswerPromptsAnswersCapturedSelectionPromptOnce(t *testing.T) {
+	menu := readParserTestdata(t, "claude", "permissions-menu.txt")
+	clk := &driveClock{t: time.Date(2026, 6, 26, 10, 0, 0, 0, time.Local)}
+	ad, err := config.Default().Adapter("claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pane := &fakePane{screen: menu}
+	sup := New(Options{
+		Adapter: ad, Tmux: pane, Prompt: prompt.NewStatic("continue"),
+		PollInterval: time.Second, ResetBuffer: time.Second, MaxWait: 24 * time.Hour,
+		Now: clk.now, AutoAnswerPrompts: true,
+	})
+
+	must(t, sup.tick()) // prompt just rendered; not idle yet
+	if len(pane.injected) != 0 {
+		t.Fatalf("must not answer before idle, got %q", pane.injected)
+	}
+	clk.add(3 * time.Second)
+	must(t, sup.tick())
+	if len(pane.injected) != 1 || pane.injected[0] != "1\r" {
+		t.Fatalf("auto-answer injected = %q, want one %q", pane.injected, "1\\r")
+	}
+	if pane.styles[0] != adapter.InjectKeys {
+		t.Fatalf("style = %q, want %q", pane.styles[0], adapter.InjectKeys)
+	}
+	clk.add(3 * time.Second)
+	must(t, sup.tick())
+	if len(pane.injected) != 1 {
+		t.Fatalf("lingering prompt was answered more than once: %q", pane.injected)
+	}
+}
+
+func TestAutoAnswerPromptsAnswersCapturedYesNoPrompt(t *testing.T) {
+	menu := readParserTestdata(t, "claude", "workspace-trust-prompt.txt")
+	clk := &driveClock{t: time.Date(2026, 6, 26, 10, 0, 0, 0, time.Local)}
+	ad, err := config.Default().Adapter("claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pane := &fakePane{screen: menu}
+	sup := New(Options{
+		Adapter: ad, Tmux: pane, Prompt: prompt.NewStatic("continue"),
+		PollInterval: time.Second, ResetBuffer: time.Second, MaxWait: 24 * time.Hour,
+		Now: clk.now, AutoAnswerPrompts: true,
+	})
+
+	must(t, sup.tick())
+	clk.add(3 * time.Second)
+	must(t, sup.tick())
+	if len(pane.injected) != 1 || pane.injected[0] != "y\r" {
+		t.Fatalf("yes/no auto-answer injected = %q, want one %q", pane.injected, "y\\r")
+	}
+}
+
+func TestAutoAnswerPromptsRefusesPlanModelPrompt(t *testing.T) {
+	menu := readParserTestdata(t, "claude", "rate-limit-menu.txt")
+	clk := &driveClock{t: time.Date(2026, 6, 26, 10, 0, 0, 0, time.Local)}
+	ad, err := adapter.Compile("claude", adapter.Spec{
+		LimitPatterns: []string{`(?i)never (?P<time>.+)`},
+		PromptPattern: config.Default().Agents["claude"].PromptPattern,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pane := &fakePane{screen: menu}
+	var manual []string
+	sup := New(Options{
+		Adapter: ad, Tmux: pane, Prompt: prompt.NewStatic("continue"),
+		PollInterval: time.Second, ResetBuffer: time.Second, MaxWait: 24 * time.Hour,
+		Now: clk.now, AutoAnswerPrompts: true,
+		OnManualAction: func(msg string) {
+			manual = append(manual, msg)
+		},
+	})
+
+	must(t, sup.tick())
+	clk.add(3 * time.Second)
+	must(t, sup.tick())
+	if len(pane.injected) != 0 {
+		t.Fatalf("plan/model prompt must not be generic auto-answered, got %q", pane.injected)
+	}
+	if len(manual) != 1 || !strings.Contains(manual[0], "plan/model/paid-option") {
+		t.Fatalf("manual warning = %q, want plan/model diagnostic", manual)
 	}
 }
 
@@ -730,9 +867,10 @@ func must(t *testing.T, err error) {
 	}
 }
 
-func readParserTestdata(t *testing.T, name string) string {
+func readParserTestdata(t *testing.T, parts ...string) string {
 	t.Helper()
-	b, err := os.ReadFile(filepath.Join("..", "parser", "testdata", name))
+	pathParts := append([]string{"..", "parser", "testdata"}, parts...)
+	b, err := os.ReadFile(filepath.Join(pathParts...))
 	if err != nil {
 		t.Fatal(err)
 	}

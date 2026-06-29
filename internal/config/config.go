@@ -35,6 +35,7 @@ type AgentConfig struct {
 	ResumeCmd      string               `toml:"resume_cmd"`
 	LimitPatterns  []string             `toml:"limit_patterns"`
 	IdlePattern    string               `toml:"idle_pattern"`
+	PromptPattern  string               `toml:"prompt_pattern"`
 	InjectStyle    string               `toml:"inject_style"`
 	TranscriptGlob string               `toml:"transcript_glob"`
 	YoloFlag       string               `toml:"yolo_flag"`
@@ -83,6 +84,7 @@ func Default() Config {
 					`(?i)(?:usage|session|weekly|\d+-?hour)\s+limit\s+reached.*?reset[s]?(?:\s+at)?\s+(?P<time>[^\r\n.]+)`,
 					`(?i)hit your\s+(?:usage|session|weekly)?\s*limit.*?reset[s]?(?:\s+at)?\s+(?P<time>[^\r\n.]+)`,
 				},
+				PromptPattern:  `(?ims)(?:^|\n)(?:(?:[^\n]*\n){0,6}\s*(?:[>\x{276F}]\s*)?1\.\s+\S[^\n]*\n\s*2\.\s+\S[^\n]*(?:\n[^\n]*){0,8}\nEnter selection \[[0-9]+-[0-9]+\](?:, or Escape to cancel)?|y\.\s+Yes[^\n]*\nn\.\s+No[^\n]*\nEnter y/n:)`,
 				InjectStyle:    adapter.InjectEscTextEnter,
 				TranscriptGlob: "~/.claude/projects/*/*.jsonl",
 				YoloFlag:       "--dangerously-skip-permissions",
@@ -91,7 +93,7 @@ func Default() Config {
 				// doesn't have to. The supervisor still gates this on the verified
 				// stop-and-wait wording before pressing any key (see scanAutoResponses).
 				AutoResponses: []AutoResponseConfig{{
-					Pattern: `(?i)rate.?limit.?options|stop and wait for (?:the|your) limit to reset`,
+					Pattern: `(?i)rate.?limit.?options|stop and wait for (?:(?:the|your) )?limit to reset`,
 					Keys:    "1\r",
 					Once:    true,
 				}},
@@ -197,6 +199,7 @@ func (c Config) Adapter(name string) (*adapter.Adapter, error) {
 		ResumeCmd:      ac.ResumeCmd,
 		LimitPatterns:  ac.LimitPatterns,
 		IdlePattern:    ac.IdlePattern,
+		PromptPattern:  ac.PromptPattern,
 		InjectStyle:    ac.InjectStyle,
 		TranscriptGlob: ac.TranscriptGlob,
 		YoloFlag:       ac.YoloFlag,

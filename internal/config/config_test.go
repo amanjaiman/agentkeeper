@@ -49,8 +49,39 @@ func TestDefaultClaudeAutoSelectsRateLimitMenu(t *testing.T) {
 	if ar.Keys != "1\r" {
 		t.Errorf("rate-limit auto-response keys = %q, want %q", ar.Keys, "1\\r")
 	}
-	if !ar.Pattern.MatchString("1. Stop and wait for the limit to reset") {
+	if !ar.Pattern.MatchString("1. Stop and wait for limit to reset") {
 		t.Errorf("auto-response pattern %q does not match the stop-and-wait menu", ar.Pattern)
+	}
+}
+
+func TestDefaultClaudePromptPattern(t *testing.T) {
+	ad, err := Default().Adapter("claude")
+	if err != nil {
+		t.Fatalf("claude adapter: %v", err)
+	}
+	if ad.PromptPattern == nil {
+		t.Fatal("default claude adapter has no prompt_pattern")
+	}
+	for _, name := range []string{
+		"rate-limit-menu.txt",
+		"permissions-menu.txt",
+		"workspace-trust-prompt.txt",
+	} {
+		body := readClaudeTestdata(t, name)
+		if !ad.PromptPattern.MatchString(body) {
+			t.Fatalf("prompt_pattern did not match captured %s", name)
+		}
+	}
+	negatives := []string{
+		"Claude Code v2.1.195\nWelcome back\n* high - /effort\n",
+		"Frosting...\nesc to interrupt\n",
+		"> 1. write tests\n2. run them\n",
+		"Here is a normal numbered list:\n1. first\n2. second\nNo prompt here.\n",
+	}
+	for _, body := range negatives {
+		if ad.PromptPattern.MatchString(body) {
+			t.Fatalf("prompt_pattern false-positive on %q", body)
+		}
 	}
 }
 
@@ -131,6 +162,30 @@ once = true
 	}
 }
 
+func TestLoadPromptPattern(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	body := `
+[agents.fake]
+launch_cmd = "fake"
+limit_patterns = ["(?i)limit (?P<time>.+)"]
+prompt_pattern = "(?i)choose one"
+`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ad, err := cfg.Adapter("fake")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ad.PromptPattern == nil || !ad.PromptPattern.MatchString("Choose one") {
+		t.Fatalf("compiled prompt pattern missing or does not match: %+v", ad.PromptPattern)
+	}
+}
+
 func contains(s, sub string) bool {
 	for i := 0; i+len(sub) <= len(s); i++ {
 		if s[i:i+len(sub)] == sub {
@@ -138,4 +193,13 @@ func contains(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+func readClaudeTestdata(t *testing.T, name string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("..", "parser", "testdata", "claude", name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
 }

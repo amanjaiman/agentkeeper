@@ -1,0 +1,7 @@
+you: /rate-limit-options
+What do you want to do?
+1. Stop and wait for limit to reset
+2. Upgrade your plan
+3. Upgrade to Team plan
+Enter selection [1-3]:
+Enter to confirm · Esc to cancel

@@ -105,6 +105,8 @@ Run flags:
                      (tmux backend keeps full handoff; pty backend ends on detach)
   --watch-only       notify at reset but do NOT auto-inject
   --yolo             append the agent's skip-permissions flag (DANGEROUS, unattended)
+  --auto-answer-prompts
+                     answer interactive prompts with the first/default option (DANGEROUS)
   --no-auto-detach   do NOT auto-detach when you attach to the session
   --no-notify        disable desktop notifications
 
@@ -135,6 +137,7 @@ func runCmd(args []string) error {
 	noNotify := fs.Bool("no-notify", false, "disable desktop notifications")
 	watchOnly := fs.Bool("watch-only", false, "notify at reset but do NOT auto-inject")
 	yolo := fs.Bool("yolo", false, "append the agent's skip-permissions flag (DANGEROUS)")
+	autoAnswerPrompts := fs.Bool("auto-answer-prompts", false, "answer interactive prompts with the first/default option (DANGEROUS)")
 	daemon := fs.Bool("daemon", false, "run in the background; control via status/detach/stop")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -159,6 +162,9 @@ func runCmd(args []string) error {
 		}
 		launch += " " + ad.YoloFlag
 		log.Printf("⚠ --yolo: launching with %q — tool calls will run UNATTENDED with no permission prompts", ad.YoloFlag)
+	}
+	if *autoAnswerPrompts {
+		log.Printf("⚠ --auto-answer-prompts: arbitrary interactive prompts may be answered UNATTENDED with their first/default option, including prompts that approve tool calls")
 	}
 
 	instance := *name
@@ -249,46 +255,48 @@ func runCmd(args []string) error {
 	}
 
 	return watchSession(watchParams{
-		instance:       instance,
-		agent:          *agent,
-		adapter:        ad,
-		pane:           pane,
-		attachHint:     attachHint,
-		startSession:   startSession,
-		foreground:     foreground,
-		afterDetach:    afterDetach,
-		builder:        builder,
-		promptMode:     promptMode,
-		resumeText:     resumeText,
-		cfg:            cfg,
-		cwd:            cwd,
-		autoDetach:     !*noAutoDetach,
-		watchOnly:      *watchOnly,
-		notifier:       buildNotifier(*noNotify, *webhookURL),
-		transparentTTY: *backend == "pty",
+		instance:          instance,
+		agent:             *agent,
+		adapter:           ad,
+		pane:              pane,
+		attachHint:        attachHint,
+		startSession:      startSession,
+		foreground:        foreground,
+		afterDetach:       afterDetach,
+		builder:           builder,
+		promptMode:        promptMode,
+		resumeText:        resumeText,
+		cfg:               cfg,
+		cwd:               cwd,
+		autoDetach:        !*noAutoDetach,
+		watchOnly:         *watchOnly,
+		autoAnswerPrompts: *autoAnswerPrompts,
+		notifier:          buildNotifier(*noNotify, *webhookURL),
+		transparentTTY:    *backend == "pty",
 	})
 }
 
 // watchParams bundles everything watchSession needs so both `run` and
 // `attach-existing` share the same observe/wait/resume core.
 type watchParams struct {
-	instance       string
-	agent          string
-	adapter        *adapter.Adapter
-	pane           supervisor.Pane
-	attachHint     string
-	startSession   func() error // nil when the session already exists (attach-existing)
-	foreground     func(ctx context.Context)
-	afterDetach    func(ctx context.Context)
-	builder        prompt.Builder
-	promptMode     string
-	resumeText     string
-	cfg            config.Config
-	cwd            string
-	autoDetach     bool
-	watchOnly      bool
-	notifier       notify.Notifier
-	transparentTTY bool
+	instance          string
+	agent             string
+	adapter           *adapter.Adapter
+	pane              supervisor.Pane
+	attachHint        string
+	startSession      func() error // nil when the session already exists (attach-existing)
+	foreground        func(ctx context.Context)
+	afterDetach       func(ctx context.Context)
+	builder           prompt.Builder
+	promptMode        string
+	resumeText        string
+	cfg               config.Config
+	cwd               string
+	autoDetach        bool
+	watchOnly         bool
+	autoAnswerPrompts bool
+	notifier          notify.Notifier
+	transparentTTY    bool
 }
 
 // watchSession runs the supervisor loop against an already-prepared backend.
@@ -307,6 +315,9 @@ func watchSession(p watchParams) error {
 	log.Printf("watching. take over any time with: %s", p.attachHint)
 	if p.watchOnly {
 		log.Printf("watch-only: will notify at reset but NOT auto-inject")
+	}
+	if p.autoAnswerPrompts {
+		log.Printf("auto-answer-prompts: enabled; interactive prompts may be accepted without a human")
 	}
 	if p.promptMode != "static" {
 		log.Printf("reprompt: %s enabled (falls back to static prompt on any failure)", p.promptMode)
@@ -355,17 +366,18 @@ func watchSession(p watchParams) error {
 	go pollControl(ctx, p.instance, cmds)
 
 	sup := supervisor.New(supervisor.Options{
-		Adapter:      p.adapter,
-		Tmux:         p.pane,
-		Prompt:       p.builder,
-		PollInterval: p.cfg.PollInterval.D(),
-		ResetBuffer:  p.cfg.ResetBuffer.D(),
-		MaxWait:      p.cfg.MaxWait.D(),
-		Cwd:          p.cwd,
-		AutoDetach:   p.autoDetach,
-		WatchOnly:    p.watchOnly,
-		Commands:     cmds,
-		OnUpdate:     writeRecord,
+		Adapter:           p.adapter,
+		Tmux:              p.pane,
+		Prompt:            p.builder,
+		PollInterval:      p.cfg.PollInterval.D(),
+		ResetBuffer:       p.cfg.ResetBuffer.D(),
+		MaxWait:           p.cfg.MaxWait.D(),
+		Cwd:               p.cwd,
+		AutoDetach:        p.autoDetach,
+		WatchOnly:         p.watchOnly,
+		AutoAnswerPrompts: p.autoAnswerPrompts,
+		Commands:          cmds,
+		OnUpdate:          writeRecord,
 		OnManualAction: func(msg string) {
 			p.notifier.Notify(notify.Event{
 				Title: "AgentKeeper [" + p.instance + "]: manual choice needed",
@@ -519,6 +531,7 @@ func attachExistingCmd(args []string) error {
 	webhookURL := fs.String("webhook", "", "POST notifications to this URL")
 	noNotify := fs.Bool("no-notify", false, "disable desktop notifications")
 	watchOnly := fs.Bool("watch-only", false, "notify at reset but do NOT auto-inject")
+	autoAnswerPrompts := fs.Bool("auto-answer-prompts", false, "answer interactive prompts with the first/default option (DANGEROUS)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -533,6 +546,9 @@ func attachExistingCmd(args []string) error {
 	ad, err := cfg.Adapter(*agent)
 	if err != nil {
 		return err
+	}
+	if *autoAnswerPrompts {
+		log.Printf("⚠ --auto-answer-prompts: arbitrary interactive prompts may be answered UNATTENDED with their first/default option, including prompts that approve tool calls")
 	}
 	instance := *name
 	if instance == "" {
@@ -568,14 +584,15 @@ func attachExistingCmd(args []string) error {
 		afterDetach: func(context.Context) {
 			log.Printf("detached. target %q left running — reattach with: %s", *target, tx.AttachHint())
 		},
-		builder:    builder,
-		promptMode: promptMode,
-		resumeText: resumeText,
-		cfg:        cfg,
-		cwd:        cwd,
-		autoDetach: !*noAutoDetach,
-		watchOnly:  *watchOnly,
-		notifier:   buildNotifier(*noNotify, *webhookURL),
+		builder:           builder,
+		promptMode:        promptMode,
+		resumeText:        resumeText,
+		cfg:               cfg,
+		cwd:               cwd,
+		autoDetach:        !*noAutoDetach,
+		watchOnly:         *watchOnly,
+		autoAnswerPrompts: *autoAnswerPrompts,
+		notifier:          buildNotifier(*noNotify, *webhookURL),
 	})
 }
 

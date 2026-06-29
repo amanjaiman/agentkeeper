@@ -19,6 +19,7 @@ limit_patterns  = [
   "(?i)(?:usage|session|weekly|\\d+-?hour)\\s+limit\\s+reached.*?reset[s]?(?:\\s+at)?\\s+(?P<time>[^\\r\\n.]+)",
   "(?i)hit your\\s+(?:usage|session|weekly)?\\s*limit.*?reset[s]?(?:\\s+at)?\\s+(?P<time>[^\\r\\n.]+)",
 ]
+prompt_pattern = "(?ims)(?:^|\\n)(?:(?:[^\\n]*\\n){0,6}\\s*(?:[>\\x{276F}]\\s*)?1\\.\\s+\\S[^\\n]*\\n\\s*2\\.\\s+\\S[^\\n]*(?:\\n[^\\n]*){0,8}\\nEnter selection \\[[0-9]+-[0-9]+\\](?:, or Escape to cancel)?|y\\.\\s+Yes[^\\n]*\\nn\\.\\s+No[^\\n]*\\nEnter y/n:)"
 inject_style    = "esc-text-enter"   # Esc, then text, then Enter
 transcript_glob = "~/.claude/projects/*/*.jsonl"
 # Appended to the launch command ONLY with the explicit --yolo opt-in (DANGEROUS:
@@ -30,7 +31,7 @@ yolo_flag       = "--dangerously-skip-permissions"
 # presses a key once the verified stop-and-wait wording is on screen. Override or
 # disable it here (set keys = "" to turn the key-press into a notify-only prompt).
 [[agents.claude.auto_responses]]
-pattern = "(?i)rate.?limit.?options|stop and wait for (?:the|your) limit to reset"
+pattern = "(?i)rate.?limit.?options|stop and wait for (?:(?:the|your) )?limit to reset"
 keys    = "1\r"
 once    = true
 
