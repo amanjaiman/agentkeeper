@@ -136,10 +136,12 @@ func TestStaleLimitLineNotReinjected(t *testing.T) {
 	clk := &driveClock{t: time.Date(2026, 6, 26, 10, 0, 0, 0, time.Local)}
 	limitLine := "Claude AI usage limit reached|" + itoa(clk.now().Add(5*time.Second).Unix())
 	pane := &fakePane{screen: "working\n"}
-	// Injection appends the agent's echo but KEEPS the limit line on screen,
-	// mimicking tmux scrollback retaining it.
-	pane.onInject = func(text string) string {
-		return pane.screen + "agent received: " + text + "\n"
+	// Injection submits the prompt (it leaves the input box and the agent works
+	// again) but KEEPS the limit line up in scrollback, mimicking tmux retaining
+	// it. The prompt must not appear in the bottom input region, or the supervisor
+	// would read it as still-unsent.
+	pane.onInject = func(string) string {
+		return pane.screen + "\n● Working… (esc to interrupt)\n> \n"
 	}
 
 	ad, err := adapter.Compile("claude", adapter.Spec{
@@ -174,6 +176,205 @@ func TestStaleLimitLineNotReinjected(t *testing.T) {
 	}
 	if len(pane.injected) != 1 {
 		t.Fatalf("injected %d times %v, want exactly 1 (stale line must not re-trigger)", len(pane.injected), pane.injected)
+	}
+}
+
+// TestResumeRetriesEnterWhenPromptNotSubmitted reproduces the field report: the
+// resume prompt is typed into the input box but the Enter is swallowed, so it
+// sits there unsent. Once the pane settles, the supervisor must press Enter (only)
+// to submit it — without re-typing the prompt — and then confirm the resume.
+func TestResumeRetriesEnterWhenPromptNotSubmitted(t *testing.T) {
+	clk := &driveClock{t: time.Date(2026, 6, 26, 10, 0, 0, 0, time.Local)}
+	pane := &fakePane{screen: "working...\n"}
+	pane.onInject = func(text string) string {
+		if text == "" {
+			// A lone Enter finally submits the prompt; the agent works again.
+			return "resumed, working again\n"
+		}
+		// esc-text-enter typed the prompt but the Enter was swallowed: it sits
+		// unsent in the input box at the bottom of the pane.
+		return "> " + text + "\n"
+	}
+
+	sup := New(Options{
+		Adapter:      testAdapter(t),
+		Tmux:         pane,
+		Prompt:       prompt.NewStatic("continue"),
+		PollInterval: time.Second,
+		ResetBuffer:  60 * time.Second,
+		MaxWait:      24 * time.Hour,
+		Now:          clk.now,
+	})
+
+	must(t, sup.tick()) // RUNNING
+	pane.screen = "5-hour limit reached ∙ resets 11am\n"
+	must(t, sup.tick()) // LIMITED
+	must(t, sup.tick()) // WAITING
+	clk.add(2 * time.Hour)
+	must(t, sup.tick()) // -> RESUMING
+	clk.add(3 * time.Second)
+	must(t, sup.tick()) // idle -> types the prompt (not submitted)
+
+	if len(pane.injected) != 1 || pane.injected[0] != "continue" {
+		t.Fatalf("first inject = %v, want [continue]", pane.injected)
+	}
+
+	// The prompt is sitting unsent; the pane just changed so it is not idle yet.
+	must(t, sup.tick())
+	if sup.State() != state.Resuming {
+		t.Fatalf("state = %s, want RESUMING while the prompt sits unsent", sup.State())
+	}
+	if len(pane.injected) != 1 {
+		t.Fatalf("must not re-type the prompt, injected = %v", pane.injected)
+	}
+
+	// Let the pane settle: now the supervisor should press Enter (only) to submit.
+	clk.add(3 * time.Second)
+	must(t, sup.tick())
+	if len(pane.injected) != 2 || pane.injected[1] != "" || pane.styles[1] != adapter.InjectEnter {
+		t.Fatalf("second inject = %v styles=%v, want a single Enter-only submit", pane.injected, pane.styles)
+	}
+
+	must(t, sup.tick()) // the Enter submitted the prompt -> resume confirmed
+	if sup.State() != state.Running {
+		t.Fatalf("state = %s, want RUNNING after the Enter submitted the prompt", sup.State())
+	}
+}
+
+// TestResumeClearsResetState verifies that once a resume is confirmed the reset
+// and wait times are cleared, so `agentkeeper status` no longer shows a stale
+// WAITING countdown (the field report's third bug).
+func TestResumeClearsResetState(t *testing.T) {
+	clk := &driveClock{t: time.Date(2026, 6, 26, 10, 0, 0, 0, time.Local)}
+	pane := &fakePane{screen: "working...\n"}
+	pane.onInject = func(string) string { return "resumed, working again\n" }
+
+	var last Snapshot
+	sup := New(Options{
+		Adapter:      testAdapter(t),
+		Tmux:         pane,
+		Prompt:       prompt.NewStatic("continue"),
+		PollInterval: time.Second,
+		ResetBuffer:  60 * time.Second,
+		MaxWait:      24 * time.Hour,
+		Now:          clk.now,
+		OnUpdate:     func(s Snapshot) { last = s },
+	})
+
+	must(t, sup.tick()) // RUNNING
+	pane.screen = "5-hour limit reached ∙ resets 11am\n"
+	must(t, sup.tick()) // LIMITED
+	must(t, sup.tick()) // WAITING
+	if last.WaitUntil.IsZero() {
+		t.Fatal("expected a wait time while WAITING")
+	}
+	clk.add(2 * time.Hour)
+	must(t, sup.tick()) // -> RESUMING
+	clk.add(3 * time.Second)
+	must(t, sup.tick()) // idle -> inject
+	must(t, sup.tick()) // resume confirmed -> RUNNING
+
+	if sup.State() != state.Running {
+		t.Fatalf("state = %s, want RUNNING", sup.State())
+	}
+	if !last.WaitUntil.IsZero() || !last.Reset.Time.IsZero() {
+		t.Fatalf("reset state not cleared after resume: %+v", last)
+	}
+}
+
+func TestPostResumeStaleClockBannerDoesNotRearmNextDay(t *testing.T) {
+	clk := &driveClock{t: time.Date(2026, 6, 26, 19, 0, 0, 0, time.Local)}
+	pane := &fakePane{screen: "working...\n"}
+	pane.onInject = func(string) string { return "resumed, working again\n" }
+
+	ad, err := adapter.Compile("claude", adapter.Spec{
+		LimitPatterns: []string{`(?i)hit your session limit.*resets\s+(?P<time>[^\r\n]+)`},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sup := New(Options{
+		Adapter: ad, Tmux: pane, Prompt: prompt.NewStatic("continue"),
+		PollInterval: time.Second, ResetBuffer: time.Second, MaxWait: 24 * time.Hour,
+		Now: clk.now,
+	})
+
+	must(t, sup.tick()) // RUNNING
+	pane.screen = "You've hit your session limit. Your limit resets 7:01pm\n"
+	must(t, sup.tick()) // LIMITED
+	must(t, sup.tick()) // WAITING
+	clk.add(2 * time.Minute)
+	must(t, sup.tick()) // RESUMING
+	clk.add(3 * time.Second)
+	must(t, sup.tick()) // inject
+	must(t, sup.tick()) // resume confirmed
+
+	if sup.State() != state.Running {
+		t.Fatalf("state = %s, want RUNNING after resume", sup.State())
+	}
+
+	// The same bare reset time is still rendered, but with different text, so
+	// byte-for-byte handledMatch dedupe cannot catch it. It must not roll to
+	// tomorrow and re-enter WAITING.
+	pane.screen = "You've hit your session limit again. Your limit resets 7:01pm\n"
+	must(t, sup.tick()) // post-resume cooldown suppresses immediate re-arm
+	clk.add(3 * time.Second)
+	must(t, sup.tick()) // next-day roll-forward guard suppresses it after cooldown
+
+	if sup.State() != state.Running {
+		t.Fatalf("state = %s, want RUNNING for stale post-resume banner", sup.State())
+	}
+	if !sup.waitUntil.IsZero() || !sup.reset.Time.IsZero() {
+		t.Fatalf("stale banner re-armed reset state: reset=%+v waitUntil=%v", sup.reset, sup.waitUntil)
+	}
+	if len(pane.injected) != 1 {
+		t.Fatalf("injected %d times %v, want only the resume prompt", len(pane.injected), pane.injected)
+	}
+}
+
+func TestNewLimitAfterResumeStillDetected(t *testing.T) {
+	clk := &driveClock{t: time.Date(2026, 6, 26, 19, 0, 0, 0, time.Local)}
+	pane := &fakePane{screen: "working...\n"}
+	pane.onInject = func(string) string { return "resumed, working again\n" }
+
+	ad, err := adapter.Compile("claude", adapter.Spec{
+		LimitPatterns: []string{`(?i)hit your session limit.*resets\s+(?P<time>[^\r\n]+)`},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sup := New(Options{
+		Adapter: ad, Tmux: pane, Prompt: prompt.NewStatic("continue"),
+		PollInterval: time.Second, ResetBuffer: time.Second, MaxWait: 24 * time.Hour,
+		Now: clk.now,
+	})
+
+	must(t, sup.tick())
+	pane.screen = "You've hit your session limit. Your limit resets 7:01pm\n"
+	must(t, sup.tick())
+	must(t, sup.tick())
+	clk.add(2 * time.Minute)
+	must(t, sup.tick())
+	clk.add(3 * time.Second)
+	must(t, sup.tick())
+	must(t, sup.tick())
+	if sup.State() != state.Running {
+		t.Fatalf("state = %s, want RUNNING after resume", sup.State())
+	}
+
+	clk.add(3 * time.Second) // beyond post-resume cooldown
+	pane.screen = "You've hit your session limit. Your limit resets 8:30pm\n"
+	must(t, sup.tick()) // RUNNING -> LIMITED
+	if sup.State() != state.Limited {
+		t.Fatalf("state = %s, want LIMITED for a real new future limit", sup.State())
+	}
+	must(t, sup.tick()) // LIMITED -> WAITING
+	if sup.State() != state.Waiting {
+		t.Fatalf("state = %s, want WAITING for a real new future limit", sup.State())
+	}
+	want := time.Date(2026, 6, 26, 20, 30, 1, 0, time.Local)
+	if !sup.waitUntil.Equal(want) {
+		t.Fatalf("waitUntil = %v, want %v", sup.waitUntil, want)
 	}
 }
 

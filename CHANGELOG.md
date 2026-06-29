@@ -39,5 +39,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 - The watch loop no longer spins indefinitely when the supervised session
   disappears; `run` exits within a couple of poll intervals.
+- **Rate-limit menu auto-handled** — the built-in `claude` adapter now auto-selects
+  "1. Stop and wait for the limit to reset" when Claude's rate-limit menu appears,
+  so you no longer have to choose it yourself (it still only presses a key once the
+  verified stop-and-wait wording is on screen).
+- **Resume prompt is actually submitted** — on the pty/ConPTY backends the resume
+  prompt's Enter is now sent as a separate keypress after a short settle, so the
+  agent's TUI accepts it as a submit instead of swallowing it into the paste. The
+  supervisor also verifies the prompt left the input box and re-presses Enter (only)
+  if it is still sitting there unsent, instead of treating any pane change as success.
+- **`status` no longer shows a stale `WAITING`/reset** — the resolved reset and wait
+  times are cleared once the agent resumes, so `status` reports `RUNNING` with no
+  leftover countdown.
 
 [Unreleased]: https://github.com/amanjaiman/agentkeeper/commits/main

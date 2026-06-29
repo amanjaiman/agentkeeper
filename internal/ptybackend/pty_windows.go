@@ -14,6 +14,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 	"unsafe"
 
 	"github.com/amanjaiman/agentkeeper/internal/adapter"
@@ -26,6 +27,7 @@ import (
 var (
 	kernel32                              = windows.NewLazySystemDLL("kernel32.dll")
 	procCreatePseudoConsole               = kernel32.NewProc("CreatePseudoConsole")
+	procResizePseudoConsole               = kernel32.NewProc("ResizePseudoConsole")
 	procClosePseudoConsole                = kernel32.NewProc("ClosePseudoConsole")
 	procInitializeProcThreadAttributeList = kernel32.NewProc("InitializeProcThreadAttributeList")
 	procUpdateProcThreadAttribute         = kernel32.NewProc("UpdateProcThreadAttribute")
@@ -82,8 +84,11 @@ func (c *Client) Start(command string) error {
 		return fmt.Errorf("create output pipe: %w", err)
 	}
 
-	// Create the pseudoconsole from the console-side pipe ends.
-	r, _, _ := procCreatePseudoConsole.Call(coord(120, 30), uintptr(ptyIn), uintptr(ptyOut), 0, uintptr(unsafe.Pointer(&c.hpcon)))
+	// Create the pseudoconsole sized to the real terminal, so the agent's TUI
+	// (which positions itself with absolute cursor moves) renders correctly when
+	// echoed to that terminal. A wrong size scatters the layout.
+	cw, ch := consoleSize()
+	r, _, _ := procCreatePseudoConsole.Call(coord(cw, ch), uintptr(ptyIn), uintptr(ptyOut), 0, uintptr(unsafe.Pointer(&c.hpcon)))
 	windows.CloseHandle(ptyIn) // the console duplicated these; drop our copies
 	windows.CloseHandle(ptyOut)
 	if r != 0 {
@@ -132,6 +137,7 @@ func (c *Client) Start(command string) error {
 	c.echo = term.IsTerminal(int(os.Stdout.Fd()))
 
 	go c.pump()
+	go c.watchResize(cw, ch)
 	// conhost (not the child) holds the output pipe's write end, so the pipe never
 	// EOFs on child exit. Detect exit by waiting on the process handle instead.
 	go func() {
@@ -139,6 +145,41 @@ func (c *Client) Start(command string) error {
 		c.markEnded()
 	}()
 	return nil
+}
+
+// consoleSize reports the current terminal size, falling back to a sane default
+// when stdout isn't a terminal (e.g. running under --daemon).
+func consoleSize() (int16, int16) {
+	w, h := int16(120), int16(30)
+	if term.IsTerminal(int(os.Stdout.Fd())) {
+		if cw, ch, err := term.GetSize(int(os.Stdout.Fd())); err == nil && cw > 0 && ch > 0 {
+			w, h = int16(cw), int16(ch)
+		}
+	}
+	return w, h
+}
+
+// watchResize keeps the pseudoconsole sized to the real terminal: it polls the
+// terminal dimensions and calls ResizePseudoConsole whenever they change, so the
+// agent re-lays-out its TUI to match. Stops when the agent exits.
+func (c *Client) watchResize(w, h int16) {
+	t := time.NewTicker(time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-c.done:
+			return
+		case <-t.C:
+			nw, nh := consoleSize()
+			if nw == w && nh == h {
+				continue
+			}
+			w, h = nw, nh
+			if c.hpcon != 0 {
+				procResizePseudoConsole.Call(uintptr(c.hpcon), coord(w, h))
+			}
+		}
+	}
 }
 
 // buildAttributeList allocates a proc-thread attribute list holding the
@@ -207,16 +248,22 @@ func (c *Client) Capture(scrollback int) (string, error) {
 	return strings.Join(lines, "\n"), nil
 }
 
-// Inject writes the resume keystrokes to the console input (Enter = CR).
+// Inject writes the resume keystrokes to the console input (Enter = CR). The
+// text and its trailing Enter are sent as separate writes with a short settle
+// delay so the agent's TUI accepts the Enter as a submit rather than swallowing
+// it into the pasted block (see submitSettle).
 func (c *Client) Inject(text, style string) error {
 	if c.inWrite == nil {
 		return fmt.Errorf("conpty not started")
 	}
-	if style == adapter.InjectKeys {
+	switch style {
+	case adapter.InjectKeys:
 		_, err := c.inWrite.Write([]byte(text))
 		return err
+	case adapter.InjectEnter:
+		return c.submit()
 	}
-	if style == "esc-text-enter" {
+	if style == adapter.InjectEscTextEnter {
 		if _, err := c.inWrite.Write([]byte{0x1b}); err != nil {
 			return err
 		}
@@ -224,6 +271,12 @@ func (c *Client) Inject(text, style string) error {
 	if _, err := c.inWrite.Write([]byte(text)); err != nil {
 		return err
 	}
+	return c.submit()
+}
+
+// submit sends Enter on its own after letting the just-written text settle.
+func (c *Client) submit() error {
+	time.Sleep(submitSettle)
 	_, err := c.inWrite.Write([]byte("\r"))
 	return err
 }

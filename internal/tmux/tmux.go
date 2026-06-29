@@ -80,6 +80,10 @@ func (c *Client) Inject(text, style string) error {
 	if style == adapter.InjectKeys {
 		return c.injectKeys(text)
 	}
+	if style == adapter.InjectEnter {
+		_, err := c.run("send-keys", "-t", c.Session, "Enter")
+		return err
+	}
 	if style == adapter.InjectEscTextEnter {
 		if _, err := c.run("send-keys", "-t", c.Session, "Escape"); err != nil {
 			return err

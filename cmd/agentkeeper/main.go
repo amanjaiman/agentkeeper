@@ -55,10 +55,14 @@ func main() {
 		err = installCmd(os.Args[2:])
 	case "status":
 		err = statusCmd(os.Args[2:])
+	case "logs":
+		err = logsCmd(os.Args[2:])
 	case "detach":
 		err = controlCmd(os.Args[2:], "detach")
 	case "stop":
 		err = stopCmd(os.Args[2:])
+	case "rm":
+		err = rmCmd(os.Args[2:])
 	case "version", "--version", "-v":
 		fmt.Printf("agentkeeper %s\n", version)
 	case "-h", "--help", "help":
@@ -83,8 +87,10 @@ Usage:
   agentkeeper parse           --agent A "limit text..."       test a limit string against patterns
   agentkeeper install         [--dir DIR] [--force]           copy this binary to a PATH directory
   agentkeeper status          [--name NAME]                   report state / countdown
+  agentkeeper logs            --name NAME [--follow]          print / tail the instance log
   agentkeeper detach          --name NAME                     stop watching, keep session
   agentkeeper stop            --name NAME [--kill]             stop watching (optionally kill)
+  agentkeeper rm              --name NAME [--force] | --all    remove a stale/ended instance record
   agentkeeper version                                         print version
 
 Run flags:
@@ -102,9 +108,14 @@ Run flags:
   --no-auto-detach   do NOT auto-detach when you attach to the session
   --no-notify        disable desktop notifications
 
+The trailing "-- launch-command..." is optional: omit it to use the adapter's
+default command (the "claude" adapter runs "claude"). Pass it only to launch
+something different — your own flags, a wrapper, or another binary.
+
 Examples:
-  agentkeeper run --agent claude --name feature-x -- claude
-  agentkeeper run --agent codex --prompt "Continue; run the tests." -- codex
+  agentkeeper run --agent claude --name feature-x
+  agentkeeper run --agent codex --prompt "Continue; run the tests."
+  agentkeeper run --agent claude -- claude --model opus   # custom launch command
   agentkeeper attach-existing --agent claude --target mywork:0.1
   agentkeeper parse --agent claude "5-hour limit reached ∙ resets 2pm"
   agentkeeper status
@@ -301,7 +312,7 @@ func watchSession(p watchParams) error {
 		log.Printf("reprompt: %s enabled (falls back to static prompt on any failure)", p.promptMode)
 	}
 	if p.transparentTTY {
-		log.Printf("pty pass-through: stdin/stdout are reserved for the agent; use `agentkeeper detach --name %s` or `agentkeeper stop --name %s` from another shell", p.instance, p.instance)
+		log.Printf("pty pass-through: stdin/stdout are reserved for the agent; from another shell use `agentkeeper logs --name %s -f`, `agentkeeper status`, or `agentkeeper detach/stop --name %s`", p.instance, p.instance)
 	} else {
 		log.Printf("%s", hotkeys.Legend)
 	}
@@ -376,6 +387,7 @@ func watchSession(p watchParams) error {
 	if sup.SessionEnded() {
 		// The agent exited or the session was killed out from under us; there is
 		// no live session to hand back, so skip the reattach hint.
+		statefile.Remove(p.instance)
 		log.Printf("session %q ended — the agent exited. Nothing left to watch.", p.instance)
 		return nil
 	}
@@ -442,7 +454,7 @@ func daemonize(instance string, runArgs []string) error {
 	if err != nil {
 		return err
 	}
-	logPath := filepath.Join(statefile.Dir(), instance+".log")
+	logPath := instanceLogPath(instance)
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
 		return err
 	}
@@ -469,14 +481,14 @@ func daemonize(instance string, runArgs []string) error {
 	_ = statefile.Write(statefile.Record{Name: instance, State: "RUNNING", PID: pid})
 
 	fmt.Printf("agentkeeper: %q started in background (pid %d)\n", instance, pid)
-	fmt.Printf("  logs:   %s\n", logPath)
+	fmt.Printf("  logs:   agentkeeper logs --name %s --follow   (file: %s)\n", instance, logPath)
 	fmt.Printf("  status: agentkeeper status --name %s\n", instance)
 	fmt.Printf("  stop:   agentkeeper detach --name %s   (or: stop --name %s --kill)\n", instance, instance)
 	return nil
 }
 
 func redirectLogsToInstanceFile(instance string) (func(), error) {
-	logPath := filepath.Join(statefile.Dir(), instance+".log")
+	logPath := instanceLogPath(instance)
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
 		return nil, err
 	}
@@ -753,6 +765,18 @@ func resetCol(r statefile.Record) string {
 	return fmt.Sprintf("%s (in %s)", r.WaitUntil.Local().Format("15:04"), d.Round(time.Second))
 }
 
+// cleanupIfDead removes an instance's stale record when its supervisor process
+// is no longer running, returning true if it handled the (dead) instance. This
+// is what lets stop/detach tidy up an instance that already ended on its own
+// instead of writing a control command no live supervisor will ever read.
+func cleanupIfDead(rec statefile.Record) bool {
+	if processAlive(rec.PID) {
+		return false
+	}
+	statefile.Remove(rec.Name)
+	return true
+}
+
 func controlCmd(args []string, command string) error {
 	fs := flag.NewFlagSet(command, flag.ContinueOnError)
 	name := fs.String("name", "", "instance name")
@@ -762,8 +786,13 @@ func controlCmd(args []string, command string) error {
 	if *name == "" {
 		return fmt.Errorf("--name is required")
 	}
-	if _, err := statefile.Read(*name); err != nil {
+	rec, err := statefile.Read(*name)
+	if err != nil {
 		return fmt.Errorf("no such instance %q", *name)
+	}
+	if cleanupIfDead(rec) {
+		fmt.Printf("%q was not running (last state: %s); cleaned up its record\n", *name, rec.State)
+		return nil
 	}
 	if err := statefile.WriteControl(*name, command); err != nil {
 		return err
@@ -782,8 +811,16 @@ func stopCmd(args []string) error {
 	if *name == "" {
 		return fmt.Errorf("--name is required")
 	}
-	if _, err := statefile.Read(*name); err != nil {
+	rec, err := statefile.Read(*name)
+	if err != nil {
 		return fmt.Errorf("no such instance %q", *name)
+	}
+	if cleanupIfDead(rec) {
+		fmt.Printf("%q was not running (last state: %s); cleaned up its record\n", *name, rec.State)
+		if *kill && rec.Session != "" {
+			fmt.Printf("(if a tmux session %q is somehow still alive, kill it with: tmux kill-session -t %s)\n", rec.Session, rec.Session)
+		}
+		return nil
 	}
 	cmd := "detach"
 	if *kill {
@@ -793,6 +830,47 @@ func stopCmd(args []string) error {
 		return err
 	}
 	fmt.Printf("%s requested for %q\n", cmd, *name)
+	return nil
+}
+
+// rmCmd removes instance records. By default it refuses to remove a record whose
+// supervisor still appears to be running (that would orphan it from status and
+// control); --force overrides. --all prunes every record with no live supervisor.
+func rmCmd(args []string) error {
+	fs := flag.NewFlagSet("rm", flag.ContinueOnError)
+	name := fs.String("name", "", "instance name")
+	all := fs.Bool("all", false, "remove every record whose supervisor is not running")
+	force := fs.Bool("force", false, "remove even if the supervisor appears to be running")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *all {
+		recs, err := statefile.List()
+		if err != nil {
+			return err
+		}
+		removed := 0
+		for _, r := range recs {
+			if *force || !processAlive(r.PID) {
+				statefile.Remove(r.Name)
+				removed++
+			}
+		}
+		fmt.Printf("removed %d record(s)\n", removed)
+		return nil
+	}
+	if *name == "" {
+		return fmt.Errorf("--name or --all is required")
+	}
+	rec, err := statefile.Read(*name)
+	if err != nil {
+		return fmt.Errorf("no such instance %q", *name)
+	}
+	if processAlive(rec.PID) && !*force {
+		return fmt.Errorf("%q still has a running supervisor (pid %d); stop it with `agentkeeper stop --name %s --kill` first, or pass --force", *name, rec.PID, *name)
+	}
+	statefile.Remove(*name)
+	fmt.Printf("removed record for %q\n", *name)
 	return nil
 }
 

@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/amanjaiman/agentkeeper/internal/adapter"
 	"github.com/creack/pty"
@@ -88,12 +89,18 @@ func (c *Client) Capture(scrollback int) (string, error) {
 }
 
 // Inject writes the resume keystrokes to the pty (Enter is a carriage return).
+// The text and its trailing Enter are sent as separate writes with a short
+// settle delay so the agent's TUI accepts the Enter as a submit rather than
+// swallowing it into the pasted block (see submitSettle).
 func (c *Client) Inject(text, style string) error {
-	if style == adapter.InjectKeys {
+	switch style {
+	case adapter.InjectKeys:
 		_, err := c.ptmx.Write([]byte(text))
 		return err
+	case adapter.InjectEnter:
+		return c.submit()
 	}
-	if style == "esc-text-enter" {
+	if style == adapter.InjectEscTextEnter {
 		if _, err := c.ptmx.Write([]byte{0x1b}); err != nil {
 			return err
 		}
@@ -101,6 +108,12 @@ func (c *Client) Inject(text, style string) error {
 	if _, err := c.ptmx.Write([]byte(text)); err != nil {
 		return err
 	}
+	return c.submit()
+}
+
+// submit sends Enter on its own after letting the just-written text settle.
+func (c *Client) submit() error {
+	time.Sleep(submitSettle)
 	_, err := c.ptmx.Write([]byte("\r"))
 	return err
 }

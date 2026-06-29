@@ -37,6 +37,23 @@ func TestDefaultAdaptersCompile(t *testing.T) {
 	}
 }
 
+func TestDefaultClaudeAutoSelectsRateLimitMenu(t *testing.T) {
+	ad, err := Default().Adapter("claude")
+	if err != nil {
+		t.Fatalf("claude adapter: %v", err)
+	}
+	if len(ad.AutoResponses) == 0 {
+		t.Fatal("default claude adapter ships no auto_responses; the rate-limit menu won't be auto-answered")
+	}
+	ar := ad.AutoResponses[0]
+	if ar.Keys != "1\r" {
+		t.Errorf("rate-limit auto-response keys = %q, want %q", ar.Keys, "1\\r")
+	}
+	if !ar.Pattern.MatchString("1. Stop and wait for the limit to reset") {
+		t.Errorf("auto-response pattern %q does not match the stop-and-wait menu", ar.Pattern)
+	}
+}
+
 func TestLoadMissingFileReturnsDefaults(t *testing.T) {
 	cfg, err := Load(filepath.Join(t.TempDir(), "does-not-exist.toml"))
 	if err != nil {
